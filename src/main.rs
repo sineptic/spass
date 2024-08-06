@@ -1,121 +1,365 @@
-use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+#![warn(clippy::pedantic)]
+#![allow(clippy::missing_errors_doc)]
+#![deny(clippy::missing_panics_doc)]
+#![allow(clippy::redundant_closure_for_method_calls)]
 
-// TODO: load from config
+use arboard::Clipboard;
+use args::{Args, Command};
+use clap::Parser;
+use std::{
+    fmt::Display,
+    io::{stderr, stdin, stdout, Write},
+    path::Path,
+    process::exit,
+    ptr::drop_in_place,
+    string::FromUtf8Error,
+    sync::{Arc, LazyLock, Mutex},
+    thread::sleep,
+    time::Duration,
+};
+use thiserror::Error;
+
+// TODO: load it smart
 static CLIP_TIME: usize = 45;
-static EDITOR_NAME: &str = "vi";
+static EDITOR_NAME: LazyLock<String> =
+    LazyLock::new(|| std::env::var("EDITOR").unwrap_or("vi".to_string()));
 static DEFAULT_GENERATED_LENGTH: usize = 25;
 
-#[derive(Parser, Debug)]
-#[command(version)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
+#[allow(clippy::option_option)]
+mod args;
+mod utils;
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
+    #[error(transparent)]
+    GPG(#[from] gpgme::Error),
+    #[error(transparent)] // TODO: custom message
+    FromUtf(#[from] FromUtf8Error),
+    #[error(transparent)]
+    Clipboard(#[from] arboard::Error),
+
+    #[error(
+        "You must run:\n    {} init ...\n before you may use th password store",
+        utils::how_i_invoked()
+    )]
+    PasswordStoreUninitialized,
+    #[error("There is no password to put on the clipboard at line {line_number}")]
+    NoPasswordAtLine { line_number: usize },
+    #[error("Tree command not found. Try install one of [{}]", supported_commands.join(", "))]
+    TreeCommandNotFound { supported_commands: Vec<String> },
+    #[error("the entered passwords do not match")]
+    PasswordsDontMatch,
+    #[error("{pass_name} is not in the password store.\nNote: Your pass will have path {:?}", api::PASS_DIR_ROOT.join(pass_name))]
+    PassDoesNotExist { pass_name: String },
+}
+type Result<T> = std::result::Result<T, Error>;
+
+mod api;
+pub use api::*;
+
+#[allow(clippy::too_many_lines)]
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    // dbg!(&args);
+    match args.command {
+        Command::Init { subfolder, gpg_ids } => api::init(subfolder, gpg_ids),
+        Command::List { subfolder } => {
+            check_uninitialized_store()?;
+            let output = run_tree_cmd(&api::PASS_DIR_ROOT.join(subfolder))?;
+            if output.status.success() {
+                let stdout = String::from_utf8(output.stdout)?;
+                println!("Password Store");
+                for line in stdout.lines().skip(1) {
+                    println!("{}", line.replace(".gpg", ""));
+                }
+            }
+        }
+        Command::Find { pass_names } => {
+            check_uninitialized_store()?;
+            println!("Search Terms: {}", pass_names.join(","));
+            display_matches(pass_names)?;
+        }
+        Command::Show {
+            pass_name,
+            copy_line,
+        } => {
+            check_uninitialized_store()?;
+            let copy_line = copy_line.map(|x| x.unwrap_or(1));
+            let pass = std::io::read_to_string(
+                // Safety: we drop `PassFile` after read all content
+                unsafe { api::PassFile::open(pass_name.clone()) }?.content_reader()?,
+            )?;
+            if let Some(line_number) = copy_line {
+                if line_number == 0 {
+                    eprintln!("line numbers start from 1, but you write 0");
+                    std::process::exit(1);
+                }
+                let content = pass
+                    .lines()
+                    .nth(line_number - 1)
+                    .ok_or(Error::NoPasswordAtLine { line_number })?;
+                clipboard_copy(content, &pass_name)?;
+            } else {
+                print!("{pass}");
+            }
+        }
+        Command::Grep {
+            search_string: _,
+            grep_options: _,
+        } => todo!("use grep command"),
+        Command::Insert {
+            echo,
+            multiline,
+            force,
+            pass_name,
+        } => {
+            check_uninitialized_store()?;
+            // Safety: we don't call to functions that may exit and don't drop anything
+            let mut pass_file = unsafe { api::PassFile::create(pass_name.clone(), force) }?;
+            let password = get_password_from_user(&pass_name, echo, multiline)?;
+            pass_file.content_writer()?.write_all(password.as_bytes())?;
+        }
+        Command::Edit { pass_name } => {
+            check_uninitialized_store()?;
+            // Safety: we don't call to functions that may exit and don't drop anything
+            let pass_file = unsafe { api::PassFile::open(pass_name) }?;
+            let temp_path = pass_file.get_path_to_unencrypted();
+            std::process::Command::new(&*EDITOR_NAME)
+                .arg(temp_path)
+                .spawn()?
+                .wait()?;
+        }
+        Command::Generate {
+            length,
+            no_symbols,
+            pass_name,
+            in_place,
+            force,
+            clip,
+        } => {
+            check_uninitialized_store()?;
+            let password = generate_password(length, no_symbols);
+
+            if in_place {
+                // Safety: dropped in end of if block
+                let mut pass_file = unsafe { api::PassFile::open(pass_name.clone()) }?;
+                let old_content = std::io::read_to_string(pass_file.content_reader()?)?;
+                let old_content_tail = remove_first_line(&old_content);
+                let new_content = password.clone() + "\n" + &old_content_tail;
+                pass_file
+                    .content_writer()?
+                    .write_all(new_content.as_bytes())?;
+            } else {
+                // Safety: dropped in end of else block
+                let mut pass_file = unsafe { api::PassFile::create(pass_name.clone(), force) }?;
+                pass_file.content_writer()?.write_all(password.as_bytes())?;
+            }
+            if clip {
+                clipboard_copy(&password, &pass_name)?;
+            }
+        }
+        Command::Remove {
+            pass_name,
+            force,
+            recursive,
+        } => {
+            check_uninitialized_store()?;
+            let path = if recursive {
+                api::PASS_DIR_ROOT.join(&pass_name)
+            } else {
+                api::get_pass_path(pass_name.clone())
+            };
+            if !path.exists() {
+                return Err(Error::PassDoesNotExist {
+                    pass_name: pass_name.clone(),
+                }
+                .into());
+            }
+
+            // to make it lazy
+            let agreement = || -> Result<bool> {
+                print!("Are you sure you would like to delete {pass_name}? ");
+                Ok(utils::yesno(utils::YesNo::No)? == utils::YesNo::Yes)
+            };
+            if force || agreement()? {
+                if recursive {
+                    std::fs::remove_dir_all(path)?;
+                } else {
+                    std::fs::remove_file(path)?;
+                }
+            }
+
+            eprintln!("WARNING: Current version can not add this change to git");
+        }
+        Command::Rename {
+            force: _,
+            old_path: _,
+            new_path: _,
+        } => todo!(),
+        Command::Copy {
+            force: _,
+            old_path: _,
+            new_path: _,
+        } => todo!(),
+        Command::Git {
+            git_command_args: _,
+        } => todo!(),
+    };
+    Ok(())
 }
 
-#[derive(Subcommand, Debug)]
-enum Command {
-    #[command(
-        about = "Initialize new password storage and use gpg-id for encryption. Selectively reencrypt existing passwords using new gpg-id."
-    )]
-    Init {
-        #[arg(long, short)]
-        path: Option<PathBuf>,
-        gpg_id: String,
-    },
-    #[command(about = "List passwords.")]
-    Ls { subfolder: Option<PathBuf> },
-    #[command(about = "List passwords that match pass-names.")]
-    Find { pass_names: String },
-    #[command(
-        about = format!("Show existing password.")
-    )]
-    Show {
-        pass_name: String,
-        #[arg(
-            long,
-            short,
-            value_name = "line-number",
-            help = "Put it on the clipboard and clear board after {CLIP_TIME} seconds."
-        )]
-        clip: Option<Option<usize>>,
-    },
-    #[command(about = "Search for password files containing search-string when decrypted.")]
-    Grep {
-        search_string: String,
-        grep_options: Vec<String>,
-    },
-    #[command(about = "Insert new password.")]
-    Insert {
-        #[arg(
-            long,
-            short,
-            help = "Echo the password back to the console during entry."
-        )]
-        echo: bool,
-        #[arg(long, short, help = "Entry may be multiline.")]
-        multiline: bool,
-        #[arg(
-            long,
-            short,
-            help = "Don't prompt before overwriting existing password."
-        )]
-        force: bool,
-        pass_name: String,
-    },
-    #[command(about = format!("Insert a new password or edit an existing password using {EDITOR_NAME}."))]
-    Edit { pass_name: String },
-    #[command(about = "Generate a new password.")]
-    Generate {
-        #[arg(long, short)]
-        no_symbols: bool,
-        #[arg(long, short, help = format!("Put it on the clipboard and clear board after {CLIP_TIME} seconds."))]
-        clip: bool,
-        #[arg(
-            long,
-            short,
-            help = "Replace only the first line of an existing file with a new password."
-        )]
-        in_place: bool,
-        #[arg(
-            long,
-            short,
-            help = "Don't prompt before overwriting existing password."
-        )]
-        force: bool,
-        pass_name: String,
-        #[arg(default_value = DEFAULT_GENERATED_LENGTH.to_string())]
-        length: Option<usize>,
-    },
-    #[command(about = "Remove existing password")]
-    Rm {
-        #[arg(long, short, help = "Remove directory instead")]
-        recursive: bool,
-        #[arg(long, short)]
-        force: bool,
-        pass_name: String,
-    },
-    #[command(about = "Renames or moves old-path to new-path, selectively reencrypting.")]
-    Mv {
-        #[arg(long, short)]
-        force: bool,
-        old_path: PathBuf,
-        new_path: PathBuf,
-    },
-    #[command(about = "Copies old-path to new-path, selectively reencrypting.")]
-    Cp {
-        #[arg(long, short)]
-        force: bool,
-        old_path: PathBuf,
-        new_path: PathBuf,
-    },
-    #[command(
-        about = "If the password store is a git repository, execute a git command specified by git-command-args."
-    )]
-    Git { git_command_args: Vec<String> },
+fn remove_first_line(old_content: &str) -> String {
+    let mut old_content_tail = old_content.lines().skip(1).collect::<Vec<&str>>();
+    if !old_content_tail.is_empty() {
+        old_content_tail.push(""); // for "\n" at the and
+    }
+
+    old_content_tail.join("\n")
 }
 
-fn main() {
-    let cli = Cli::parse();
-    dbg!(cli);
+fn generate_password(length: usize, no_symbols: bool) -> String {
+    use rand::prelude::*;
+    let letters = String::from("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ");
+    let numbers = String::from("0123456789");
+    let symbols = String::from(r#"!\#"$%&'()*+,-./:;<=>?@[\\]^_`{¦}~"#);
+    let chars = if no_symbols {
+        letters.chars().chain(numbers.chars()).collect::<Vec<_>>()
+    } else {
+        letters
+            .chars()
+            .chain(numbers.chars())
+            .chain(symbols.chars())
+            .collect::<Vec<_>>()
+    };
+    let a = rand::distributions::Slice::new(&chars).unwrap();
+    let mut b = rand::rngs::StdRng::sample_iter(rand::rngs::StdRng::from_entropy(), a);
+
+    // FIXME: rewrite
+    let mut password = String::new();
+    for _ in 0..length {
+        password.push(*b.next().unwrap());
+    }
+    password
+}
+
+fn get_password_from_user(pass_name: &str, echo: bool, multiline: bool) -> Result<String> {
+    let password = if echo {
+        print!("Enter password for {pass_name}: ");
+        stdout().flush()?;
+        let mut password = String::new();
+        stdin().read_line(&mut password)?;
+        password
+    } else if multiline {
+        todo!()
+    } else {
+        let password = rpassword::prompt_password(format!("Enter password for {pass_name}: "))?;
+        if password != rpassword::prompt_password(format!("Retype password for {pass_name}: "))? {
+            return Err(Error::PasswordsDontMatch);
+        }
+        password
+    };
+    Ok(password)
+}
+
+fn display_matches(pass_names: Vec<String>) -> Result<()> {
+    let output = run_tree_cmd(&api::PASS_DIR_ROOT)?;
+    if output.status.success() {
+        let output = String::from_utf8(output.stdout)?;
+
+        let lines = output.lines().skip(1);
+        let matches = filter_matches(lines, pass_names)
+            .map(|str| str.replace(".gpg", ""))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        println!("{matches}");
+    }
+
+    Ok(())
+}
+
+fn filter_matches<'a>(
+    lines: impl Iterator<Item = &'a str>,
+    words: impl IntoIterator<Item = impl AsRef<[u8]>>,
+) -> impl Iterator<Item = &'a str> {
+    let finder = aho_corasick::AhoCorasick::builder()
+        .ascii_case_insensitive(true)
+        .build(words)
+        .unwrap();
+
+    lines.filter(move |str| finder.find(str).is_some())
+}
+
+fn run_tree_cmd(path: &Path) -> Result<std::process::Output> {
+    let mut cmd_id = 0;
+    let output = std::process::Command::new("eza")
+        .arg(path)
+        .args(["--tree", "--color=always", "--dereference"])
+        .stderr(stderr())
+        .output()
+        .or_else(|_| {
+            cmd_id = 1;
+            std::process::Command::new("tree")
+                .arg(path)
+                .arg("-C")
+                .arg("--noreport")
+                .arg("--prune")
+                .stderr(stderr())
+                .output()
+        })
+        .map_err(|_| Error::TreeCommandNotFound {
+            supported_commands: vec!["eza".to_string(), "tree".to_string()],
+        })?;
+    // Some genius tree developer print error to stdout
+    if cmd_id == 1 {
+        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+    }
+    Ok(output)
+}
+
+/// # Warning
+/// On success this function doesn't return
+fn clipboard_copy(content: &str, name: &str) -> anyhow::Result<()> {
+    let clipboard = Arc::new(Mutex::new(Clipboard::new()?));
+    clipboard.lock().unwrap().set_text(content)?;
+    println!("Copied {name} to clipboard.");
+    let same_clipboard = clipboard.clone();
+    match ctrlc::set_handler(move || {
+        clear_and_exit(&same_clipboard);
+    }) {
+        Ok(()) => {
+            println!("Clipboard will be cleared in {CLIP_TIME} seconds or if you cancel program.");
+        }
+        Err(_) => {
+            println!("Clipboard will be cleared in {CLIP_TIME} seconds, don't cancel program.");
+        }
+    };
+    sleep(Duration::from_secs(CLIP_TIME as u64));
+    clear_and_exit(&clipboard);
+}
+
+fn clear_and_exit(clipboard: &Mutex<Clipboard>) -> ! {
+    match clipboard.lock() {
+        Ok(mut clipboard) => {
+            match clipboard.clear() {
+                Ok(()) => {
+                    // Safety: after drop we exit, so other can't get access to clipboard
+                    unsafe {
+                        drop_in_place(&mut *clipboard);
+                    }
+                    println!("Clipboard cleared.");
+                }
+                Err(err) => cant_clear_clipboard(err),
+            };
+        }
+        Err(err) => cant_clear_clipboard(err),
+    }
+    exit(0);
+}
+fn cant_clear_clipboard(reason: impl Display) -> ! {
+    eprintln!("Error: {reason}.");
+    println!("Warning: clear clipboard manually.");
+    exit(1);
 }
