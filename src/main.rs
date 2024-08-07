@@ -35,7 +35,7 @@ pub enum Error {
     IO(#[from] std::io::Error),
     #[error(transparent)]
     GPG(#[from] gpgme::Error),
-    #[error(transparent)] // TODO: custom message
+    #[error(transparent)]
     FromUtf(#[from] FromUtf8Error),
     #[error(transparent)]
     Clipboard(#[from] arboard::Error),
@@ -154,7 +154,9 @@ fn main() -> anyhow::Result<()> {
             } else {
                 // Safety: dropped in end of else block
                 let mut pass_file = unsafe { api::PassFile::create(pass_name.clone(), force) }?;
-                pass_file.content_writer()?.write_all(password.as_bytes())?;
+                pass_file
+                    .content_writer()?
+                    .write_all((password.clone() + "\n").as_bytes())?;
             }
             if clip {
                 clipboard_copy(&password, &pass_name)?;
