@@ -277,49 +277,15 @@ fn copy_move(
 ) -> Result<()> {
     if recursive {
         assert_ne!(old_root, *api::PASS_DIR_ROOT);
-        let files = walkdir::WalkDir::new(&old_root).contents_first(true);
-        let mut pass_files = files
-            .into_iter()
-            .filter_entry(|x| {
-                x.file_type().is_file() && x.path().extension().is_some_and(|ext| ext == "gpg")
-            })
-            .filter_map(|x| x.ok())
-            .map(|x| x.into_path())
-            .map(|x| {
-                (
-                    new_root
-                        .join(x.strip_prefix(&old_root).unwrap().to_str().unwrap())
-                        .strip_prefix(&*api::PASS_DIR_ROOT)
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                        .strip_suffix(".gpg")
-                        .unwrap()
-                        .to_string(),
-                    x.strip_prefix(&*api::PASS_DIR_ROOT)
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                        .strip_suffix(".gpg")
-                        .unwrap()
-                        .to_string(),
-                )
-            })
-            .map(|(new_pass_name, old_pass_name)| -> Result<_> {
-                // Safety: pass files will be dropped at the and of else block.
-                Ok((new_pass_name, unsafe {
-                    api::PassFile::open(old_pass_name)
-                }?))
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut pass_files = get_pass_files_recursively(&old_root, new_root)?;
         match copy_move {
             CopyMove::Copy => {
-                for (new_name, pass_file) in &mut pass_files {
+                for (pass_file, new_name) in &mut pass_files {
                     pass_file.copy(new_name.to_owned(), force)?;
                 }
             }
             CopyMove::Move => {
-                for (new_name, pass_file) in &mut pass_files {
+                for (pass_file, new_name) in &mut pass_files {
                     pass_file.rename(new_name.to_owned(), force)?;
                 }
                 // NOTE: required to run before drop
@@ -341,6 +307,48 @@ fn copy_move(
         drop(pass_file);
     }
     Ok(())
+}
+
+/// # Returns
+/// Vec<(pass file, new pass name if `old_root` change to `new_root`)>
+fn get_pass_files_recursively(old_root: &Path, new_root: &Path) -> Result<Vec<(PassFile, String)>> {
+    let files = walkdir::WalkDir::new(old_root).contents_first(true);
+    let pass_files = files
+        .into_iter()
+        .filter_entry(|x| {
+            x.file_type().is_file() && x.path().extension().is_some_and(|ext| ext == "gpg")
+        })
+        .filter_map(|x| x.ok())
+        .map(|x| x.into_path())
+        .map(|x| {
+            (
+                x.strip_prefix(&*api::PASS_DIR_ROOT)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .strip_suffix(".gpg")
+                    .unwrap()
+                    .to_string(),
+                new_root
+                    .join(x.strip_prefix(old_root).unwrap().to_str().unwrap())
+                    .strip_prefix(&*api::PASS_DIR_ROOT)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .strip_suffix(".gpg")
+                    .unwrap()
+                    .to_string(),
+            )
+        })
+        .map(|(old_pass_name, new_pass_name)| -> Result<_> {
+            // Safety: pass files will be dropped at the and of else block.
+            Ok((
+                unsafe { api::PassFile::open(old_pass_name) }?,
+                new_pass_name,
+            ))
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(pass_files)
 }
 
 fn remove_first_line(old_content: &str) -> String {
