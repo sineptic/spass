@@ -1,5 +1,5 @@
 use super::{Error, Result};
-use crate::utils;
+use crate::utils::{self, yesno};
 use std::{
     fs::File,
     io::{Read, Write},
@@ -15,13 +15,14 @@ pub static PASS_DIR_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
 #[derive(Debug)]
 #[must_use]
 pub struct PassFile {
-    pass_name: String,
+    pub pass_name: String, // FIXME: remove pub
     temp_path: tempfile::TempPath,
 }
 impl PassFile {
     /// # Safety
     /// You must drop `EncryptedFile`
     pub unsafe fn open(pass_name: String) -> Result<Self> {
+        check_uninitialized_store()?;
         let content = crate::utils::read_to_vec(get_readonly_pass_file(pass_name.clone())?)?;
         let mut gpg = gpgme::Context::from_protocol(gpgme::Protocol::OpenPgp)?;
         let content = {
@@ -44,7 +45,7 @@ impl PassFile {
             File::create_new(&path).or_else(|err| {
                 if err.kind() == std::io::ErrorKind::AlreadyExists {
                     print!("An entry already exists for {path:?}. Overwrite it? ");
-                    if utils::yesno(utils::YesNo::No)? == utils::YesNo::Yes {
+                    if utils::yesno(false)? {
                         Ok(File::create(&path)?)
                     } else {
                         Err(err)
@@ -70,7 +71,7 @@ password file after editing.
 
 Are you sure you would like to continue? "#
                 );
-                if utils::yesno(utils::YesNo::No)? == utils::YesNo::No {
+                if utils::yesno(false)? {
                     std::process::exit(1);
                 }
                 tempfile::NamedTempFile::new()
@@ -84,6 +85,38 @@ Are you sure you would like to continue? "#
             temp_path: temp_file.into_temp_path(),
         })
     }
+    /// # Warning
+    /// - You can see all changes only after `flush()` or `drop()`.
+    /// - Current changes don't affect old pass file.
+    /// # Note
+    /// If function return error, `PathFile` stay unchanged.
+    pub fn copy(&mut self, new_name: String, force: bool) -> std::io::Result<()> {
+        let new_path = get_pass_path(&new_name);
+        let user_agreement = || -> std::io::Result<bool> {
+            print!("An entry already exists for {new_path:?}. Overwrite it? ");
+            yesno(false)
+        };
+        if force || !new_path.exists() || user_agreement()? {
+            self.pass_name = new_name;
+        }
+        Ok(())
+    }
+    /// # Warning
+    /// You can see all changes only after `flush()` or `drop()`.
+    /// # Note
+    /// If function return error, `PathFile` stay unchanged.
+    pub fn rename(&mut self, new_name: String, force: bool) -> Result<()> {
+        let new_path = get_pass_path(&new_name);
+        let user_agreement = || -> std::io::Result<bool> {
+            print!("An entry already exists for {new_path:?}. Overwrite it? ");
+            yesno(false)
+        };
+        if force || !new_path.exists() || user_agreement()? {
+            std::fs::remove_file(get_pass_path(&self.pass_name))?;
+            self.pass_name = new_name;
+        }
+        Ok(())
+    }
     #[must_use]
     pub fn get_path_to_unencrypted(&self) -> &Path {
         &self.temp_path
@@ -94,10 +127,13 @@ Are you sure you would like to continue? "#
     pub fn content_reader(&self) -> std::io::Result<impl Read + '_> {
         File::open(&self.temp_path)
     }
-    // write all content from temp file to encrypted file
+    /// Write all content from temp file to encrypted file.
+    #[allow(clippy::missing_panics_doc/* Reason: get_pass_path() is not filesystem root */)]
     pub fn flush(&self) -> Result<()> {
         let final_version = crate::utils::read_to_vec(File::open(&*self.temp_path)?)?;
-        let mut pass_file = File::create(get_pass_path(self.pass_name.clone()))?;
+        let path = get_pass_path(&self.pass_name);
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        let mut pass_file = File::create(path)?;
         let encrypted = encrypt(&self.pass_name, &final_version)?;
         pass_file.write_all(&encrypted)?;
         eprintln!("WARNING: Current version can not add this change to git");
@@ -108,7 +144,7 @@ Are you sure you would like to continue? "#
 impl Drop for PassFile {
     fn drop(&mut self) {
         let error_msg = format!(
-            "can't read from temp file {:?} and then encrypt it to {:?}",
+            "Can't delete temp file with path {:?} and then encrypt it's content to {:?}. Save and delete it manually",
             &*self.temp_path, self.pass_name
         );
         self.flush().expect(&error_msg);
@@ -122,7 +158,7 @@ pub fn init(subfolder: String, recipients: Vec<String>) {
 
 fn get_readonly_pass_file(pass_name: String) -> Result<File> {
     check_uninitialized_store()?;
-    let path = get_pass_path(pass_name.clone());
+    let path = get_pass_path(&pass_name);
 
     File::open(&path).map_err(|err| {
         let err = err.into();
@@ -137,8 +173,8 @@ fn get_readonly_pass_file(pass_name: String) -> Result<File> {
         }
     })
 }
-pub fn get_pass_path(pass_name: String) -> PathBuf {
-    PASS_DIR_ROOT.join(pass_name + ".gpg")
+pub fn get_pass_path(pass_name: &impl ToString) -> PathBuf {
+    PASS_DIR_ROOT.join(pass_name.to_string() + ".gpg")
 }
 
 fn get_recipients(pass_name: &str) -> Result<Vec<String>> {

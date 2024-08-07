@@ -9,7 +9,7 @@ use clap::Parser;
 use std::{
     fmt::Display,
     io::{stderr, stdin, stdout, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::exit,
     ptr::drop_in_place,
     string::FromUtf8Error,
@@ -51,7 +51,7 @@ pub enum Error {
     TreeCommandNotFound { supported_commands: Vec<String> },
     #[error("the entered passwords do not match")]
     PasswordsDontMatch,
-    #[error("{pass_name} is not in the password store.\nNote: Your pass will have path {:?}", api::PASS_DIR_ROOT.join(pass_name))]
+    #[error("{pass_name} is not in the password store.\nNote: Your pass will have path {:?}", api::PASS_DIR_ROOT.join(pass_name).to_str().unwrap().to_string() + ".gpg")]
     PassDoesNotExist { pass_name: String },
 }
 type Result<T> = std::result::Result<T, Error>;
@@ -169,7 +169,7 @@ fn main() -> anyhow::Result<()> {
             let path = if recursive {
                 api::PASS_DIR_ROOT.join(&pass_name)
             } else {
-                api::get_pass_path(pass_name.clone())
+                api::get_pass_path(&pass_name)
             };
             if !path.exists() {
                 return Err(Error::PassDoesNotExist {
@@ -177,11 +177,12 @@ fn main() -> anyhow::Result<()> {
                 }
                 .into());
             }
+            assert_ne!(path, *api::PASS_DIR_ROOT);
 
             // to make it lazy
             let agreement = || -> Result<bool> {
                 print!("Are you sure you would like to delete {pass_name}? ");
-                Ok(utils::yesno(utils::YesNo::No)? == utils::YesNo::Yes)
+                Ok(utils::yesno(false)?)
             };
             if force || agreement()? {
                 if recursive {
@@ -194,19 +195,149 @@ fn main() -> anyhow::Result<()> {
             eprintln!("WARNING: Current version can not add this change to git");
         }
         Command::Rename {
-            force: _,
-            old_path: _,
-            new_path: _,
-        } => todo!(),
+            force,
+            old_path: old_pass,
+            new_path: new_pass,
+        } => {
+            check_uninitialized_store()?;
+            let (old_root, recursive, new_root) = find_recursion(&old_pass, &new_pass)?;
+            copy_move(
+                CopyMove::Move,
+                recursive,
+                old_root,
+                &new_root,
+                force,
+                old_pass,
+                new_pass,
+            )?;
+        }
         Command::Copy {
-            force: _,
-            old_path: _,
-            new_path: _,
-        } => todo!(),
+            force,
+            old_path: old_pass,
+            new_path: new_pass,
+        } => {
+            check_uninitialized_store()?;
+            let (old_root, recursive, new_root) = find_recursion(&old_pass, &new_pass)?;
+            copy_move(
+                CopyMove::Copy,
+                recursive,
+                old_root,
+                &new_root,
+                force,
+                old_pass,
+                new_pass,
+            )?;
+        }
         Command::Git {
             git_command_args: _,
         } => todo!(),
     };
+    Ok(())
+}
+
+fn find_recursion(
+    old_pass: &String,
+    new_pass: &String,
+) -> Result<(std::path::PathBuf, bool, std::path::PathBuf)> {
+    let old_path_dir = api::PASS_DIR_ROOT.join(old_pass);
+    let (old_root, recursive) = if old_path_dir.is_dir() {
+        (old_path_dir, true)
+    } else {
+        let old_path_file = api::get_pass_path(old_pass);
+        if !old_path_file.exists() {
+            return Err(Error::PassDoesNotExist {
+                pass_name: old_pass.clone(),
+            });
+        }
+        (old_path_file, false)
+    };
+    let new_root = if recursive {
+        api::PASS_DIR_ROOT.join(new_pass)
+    } else {
+        api::get_pass_path(new_pass)
+    };
+    Ok((old_root, recursive, new_root))
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum CopyMove {
+    Copy,
+    Move,
+}
+fn copy_move(
+    copy_move: CopyMove,
+    recursive: bool,
+    old_root: PathBuf,
+    new_root: &Path,
+    force: bool,
+    old_pass: String,
+    new_pass: String,
+) -> Result<()> {
+    if recursive {
+        assert_ne!(old_root, *api::PASS_DIR_ROOT);
+        let files = walkdir::WalkDir::new(&old_root).contents_first(true);
+        let mut pass_files = files
+            .into_iter()
+            .filter_entry(|x| {
+                x.file_type().is_file() && x.path().extension().is_some_and(|ext| ext == "gpg")
+            })
+            .filter_map(|x| x.ok())
+            .map(|x| x.into_path())
+            .map(|x| {
+                (
+                    new_root
+                        .join(x.strip_prefix(&old_root).unwrap().to_str().unwrap())
+                        .strip_prefix(&*api::PASS_DIR_ROOT)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .strip_suffix(".gpg")
+                        .unwrap()
+                        .to_string(),
+                    x.strip_prefix(&*api::PASS_DIR_ROOT)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .strip_suffix(".gpg")
+                        .unwrap()
+                        .to_string(),
+                )
+            })
+            .map(|(new_pass_name, old_pass_name)| -> Result<_> {
+                // Safety: pass files will be dropped at the and of else block.
+                Ok((new_pass_name, unsafe {
+                    api::PassFile::open(old_pass_name)
+                }?))
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        match copy_move {
+            CopyMove::Copy => {
+                for (new_name, pass_file) in &mut pass_files {
+                    pass_file.copy(new_name.to_owned(), force)?;
+                }
+            }
+            CopyMove::Move => {
+                for (new_name, pass_file) in &mut pass_files {
+                    pass_file.rename(new_name.to_owned(), force)?;
+                }
+                // NOTE: required to run before drop
+                std::fs::remove_dir_all(old_root)?;
+            }
+        }
+        drop(pass_files);
+    } else {
+        // Safety: pass file will be dropped at the and of else block.
+        let mut pass_file = unsafe { api::PassFile::open(old_pass) }?;
+        match copy_move {
+            CopyMove::Copy => {
+                pass_file.copy(new_pass, force)?;
+            }
+            CopyMove::Move => {
+                pass_file.rename(new_pass, force)?;
+            }
+        }
+        drop(pass_file);
+    }
     Ok(())
 }
 

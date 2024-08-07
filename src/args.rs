@@ -1,6 +1,5 @@
 use crate::{CLIP_TIME, DEFAULT_GENERATED_LENGTH, EDITOR_NAME};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -123,8 +122,8 @@ pub(crate) enum Command {
     Rename {
         #[arg(long, short)]
         force: bool,
-        old_path: PathBuf,
-        new_path: PathBuf,
+        old_path: String,
+        new_path: String,
     },
     #[command(
         visible_alias = "cp",
@@ -133,8 +132,8 @@ pub(crate) enum Command {
     Copy {
         #[arg(long, short)]
         force: bool,
-        old_path: PathBuf,
-        new_path: PathBuf,
+        old_path: String,
+        new_path: String,
     },
     #[command(
         about = "If the password store is a git repository, execute a git command specified by git-command-args."

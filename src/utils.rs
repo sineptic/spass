@@ -15,22 +15,20 @@ pub fn how_i_invoked() -> String {
         .to_owned()
 }
 
-#[derive(PartialEq)]
-pub enum YesNo {
-    Yes,
-    No,
-}
-pub fn yesno(safer: YesNo) -> std::io::Result<YesNo> {
+/// true it's yes
+/// false it's no
+#[allow(clippy::match_bool)]
+pub fn yesno(safer: bool) -> std::io::Result<bool> {
     match safer {
-        YesNo::Yes => print!("[Y/n] "),
-        YesNo::No => print!("[y/N] "),
+        true => print!("[Y/n] "),
+        false => print!("[y/N] "),
     };
     std::io::stdout().flush()?;
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
     match answer.to_lowercase().trim() {
-        "y" | "yes" => Ok(YesNo::Yes),
-        "n" | "no" => Ok(YesNo::No),
+        "y" | "yes" => Ok(true),
+        "n" | "no" => Ok(false),
         "" => Ok(safer),
         _ => panic!("User can't write 1 letter!"),
     }
