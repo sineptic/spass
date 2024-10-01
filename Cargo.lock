@@ -784,23 +784,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rpass"
-version = "0.0.1"
-dependencies = [
- "aho-corasick",
- "anyhow",
- "arboard",
- "clap",
- "ctrlc",
- "gpgme",
- "rand",
- "rpassword",
- "tempfile",
- "thiserror",
- "walkdir",
-]
-
-[[package]]
 name = "rpassword"
 version = "7.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -889,6 +872,23 @@ name = "smallvec"
 version = "1.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c5e1a9a646d36c3599cd173a41282daf47c44583ad367b8e6837255952e5c67"
+
+[[package]]
+name = "spass"
+version = "0.0.1"
+dependencies = [
+ "aho-corasick",
+ "anyhow",
+ "arboard",
+ "clap",
+ "ctrlc",
+ "gpgme",
+ "rand",
+ "rpassword",
+ "tempfile",
+ "thiserror",
+ "walkdir",
+]
 
 [[package]]
 name = "static_assertions"
