@@ -18,7 +18,7 @@ pub struct PassFile {
     pub pass_name: String, // FIXME: remove pub
     temp_path: tempfile::TempPath,
     /// Changes should be added to git.
-    modified: bool,
+    maybe_modified: bool,
     commit_msg: Option<String>,
 }
 impl PassFile {
@@ -59,7 +59,7 @@ impl PassFile {
             })?;
         };
         let mut temp = PassFile::new(pass_name, &[])?;
-        temp.modified = true;
+        temp.maybe_modified = true;
         Ok(temp)
     }
     /// # Warning
@@ -90,7 +90,7 @@ Are you sure you would like to continue? "#
         Ok(Self {
             pass_name,
             temp_path: temp_file.into_temp_path(),
-            modified: false,
+            maybe_modified: false,
             commit_msg: None,
         })
     }
@@ -107,7 +107,7 @@ Are you sure you would like to continue? "#
         };
         if force || !new_path.exists() || user_agreement()? {
             self.pass_name = new_name;
-            self.modified = true;
+            self.maybe_modified = true;
         }
         Ok(())
     }
@@ -124,7 +124,7 @@ Are you sure you would like to continue? "#
         if force || !new_path.exists() || user_agreement()? {
             let prev_pass_name = self.pass_name.clone();
             self.pass_name = new_name;
-            self.modified = true;
+            self.maybe_modified = true;
             self.flush()?;
             std::fs::remove_file(get_pass_path(&prev_pass_name))?;
         }
@@ -132,11 +132,11 @@ Are you sure you would like to continue? "#
     }
     #[must_use]
     pub fn get_path_to_unencrypted(&mut self) -> &Path {
-        self.modified = true;
+        self.maybe_modified = true;
         &self.temp_path
     }
     pub fn content_writer(&mut self) -> std::io::Result<impl Write + '_> {
-        self.modified = true;
+        self.maybe_modified = true;
         File::create(&self.temp_path)
     }
     pub fn content_reader(&self) -> std::io::Result<impl Read + '_> {
@@ -147,16 +147,16 @@ Are you sure you would like to continue? "#
     }
     /// Write all content from temp file to encrypted file.
     #[allow(clippy::missing_panics_doc/* Reason: get_pass_path() is not filesystem root */)]
-    pub fn flush(&self) -> Result<()> {
-        let final_version = crate::utils::read_to_vec(File::open(&*self.temp_path)?)?;
-        let path = get_pass_path(&self.pass_name);
+    pub fn flush(&mut self) -> Result<()> {
+        if self.maybe_modified {
+            let final_version = crate::utils::read_to_vec(File::open(&*self.temp_path)?)?;
+            let path = get_pass_path(&self.pass_name);
 
-        std::fs::create_dir_all(path.parent().unwrap())?;
-        let mut pass_file = File::create(path)?;
-        let encrypted = encrypt(&self.pass_name, &final_version)?;
-        pass_file.write_all(&encrypted)?;
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            let mut pass_file = File::create(path)?;
+            let encrypted = encrypt(&self.pass_name, &final_version)?;
+            pass_file.write_all(&encrypted)?;
 
-        if self.modified {
             if let Some(ref commit_msg) = self.commit_msg {
                 let result = crate::git::commit_file(
                     PASS_DIR_ROOT.as_os_str(),
@@ -169,8 +169,10 @@ Are you sure you would like to continue? "#
                         err => return Err(err),
                     }
                 }
+            } else {
+                eprintln!("NOTE: not added to git because `commit_msg` not specified.");
             }
-            eprintln!("NOTE: not added to git because `commit_msg` not specified.");
+            self.maybe_modified = false;
         }
         Ok(())
     }
