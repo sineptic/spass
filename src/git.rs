@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsStr,
     io::Write,
     path::PathBuf,
     process::{Command, ExitStatus},
@@ -6,9 +7,10 @@ use std::{
 
 type Result<T> = std::result::Result<T, crate::Error>;
 
-pub fn verify_git_initialized(path: &str) -> Result<()> {
+pub fn verify_git_initialized(path: &OsStr) -> Result<()> {
     let cmd = Command::new("git")
-        .args(["-C", path])
+        .arg("-C")
+        .arg(path)
         .arg("rev-parse")
         .arg("--is-inside-work-tree")
         .output()?;
@@ -19,9 +21,10 @@ pub fn verify_git_initialized(path: &str) -> Result<()> {
         Err(crate::Error::PassStoreShouldBeGitRepo)
     }
 }
-pub fn should_sign_commits(path: &str) -> Result<bool> {
+pub fn should_sign_commits(path: &OsStr) -> Result<bool> {
     let cmd = Command::new("git")
-        .args(["-C", path])
+        .arg("-C")
+        .arg(path)
         .arg("config")
         .arg("bool")
         .args(["--get", "pass.signcommits"])
@@ -32,20 +35,22 @@ pub fn should_sign_commits(path: &str) -> Result<bool> {
         Ok(false)
     }
 }
-pub fn command(path: &str, args: impl IntoIterator<Item = String>) -> Result<ExitStatus> {
+pub fn command(path: &OsStr, args: impl IntoIterator<Item = String>) -> Result<ExitStatus> {
     verify_git_initialized(path)?;
     Ok(Command::new("git")
-        .args(["-C", path])
+        .arg("-C")
+        .arg(path)
         .args(args)
         .spawn()?
         .wait()?)
 }
-pub fn init(path: &str, other_args: impl IntoIterator<Item = String>) -> Result<()> {
+pub fn init(path: &OsStr, other_args: impl IntoIterator<Item = String>) -> Result<()> {
     if verify_git_initialized(path).is_ok() {
         return Err(crate::Error::GitRepoAlreadyInitialized);
     }
     let cmd = Command::new("git")
-        .args(["-C", path])
+        .arg("-C")
+        .arg(path)
         .arg("init")
         .args(other_args)
         .output()?;
@@ -67,13 +72,15 @@ pub fn init(path: &str, other_args: impl IntoIterator<Item = String>) -> Result<
         "Configure git repository for gpg file diff.",
     )?;
     Command::new("git")
-        .args(["-C", path])
+        .arg("-C")
+        .arg(path)
         .arg("config")
         .arg("--local")
         .args(["diff.gpg.binary", "true"])
         .output()?;
     Command::new("git")
-        .args(["-C", path])
+        .arg("-C")
+        .arg(path)
         .arg("config")
         .arg("--local")
         .args([
@@ -84,22 +91,25 @@ pub fn init(path: &str, other_args: impl IntoIterator<Item = String>) -> Result<
         .output()?;
     Ok(())
 }
-fn unstage_all(path: &str) -> Result<()> {
+pub fn unstage_all(path: &OsStr) -> Result<()> {
     Command::new("git")
-        .args(["-C", path])
+        .arg("-C")
+        .arg(path)
         .arg("reset")
         .output()?;
     Ok(())
 }
-fn stage_file(path: &str, file_name: &str) -> Result<()> {
+fn stage_file(path: &OsStr, file_name: &str) -> Result<()> {
     Command::new("git")
-        .args(["-C", path])
+        .arg("-C")
+        .arg(path)
         .arg("add")
         .arg(file_name)
         .output()?;
 
     let output = Command::new("git")
-        .args(["-C", path])
+        .arg("-C")
+        .arg(path)
         .arg("status")
         .args(["--porcelain", file_name])
         .output()?;
@@ -114,18 +124,19 @@ fn stage_file(path: &str, file_name: &str) -> Result<()> {
     }
     Ok(())
 }
-fn stage_all(path: &str) -> Result<()> {
+fn stage_all(path: &OsStr) -> Result<()> {
     Command::new("git")
-        .args(["-C", path])
+        .arg("-C")
+        .arg(path)
         .arg("add")
         .arg("--all")
         .output()?;
     Ok(())
 }
-fn commit(path: &str, message: &str) -> Result<()> {
+fn commit(path: &OsStr, message: &str) -> Result<()> {
     verify_git_initialized(path)?;
     let mut binding = Command::new("git");
-    let cmd = binding.args(["-C", path]).arg("commit");
+    let cmd = binding.arg("-C").arg(path).arg("commit");
     if should_sign_commits(path)? {
         cmd.arg("-S");
     }
@@ -138,15 +149,14 @@ fn commit(path: &str, message: &str) -> Result<()> {
         Err(crate::Error::CantCommit)
     }
 }
-pub fn commit_all(path: &str, message: &str) -> Result<()> {
+pub fn commit_all(path: &OsStr, message: &str) -> Result<()> {
     verify_git_initialized(path)?;
     stage_all(path)?;
     commit(path, message)?;
     Ok(())
 }
-pub fn commit_file(path: &str, file_name: &str, message: &str) -> Result<()> {
+pub fn commit_file(path: &OsStr, file_name: &str, message: &str) -> Result<()> {
     verify_git_initialized(path)?;
-    unstage_all(path)?;
     stage_file(path, file_name)?;
     commit(path, message)?;
     Ok(())

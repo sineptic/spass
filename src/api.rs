@@ -19,6 +19,7 @@ pub struct PassFile {
     temp_path: tempfile::TempPath,
     /// Changes should be added to git.
     modified: bool,
+    commit_msg: Option<String>,
 }
 impl PassFile {
     /// # Safety
@@ -90,6 +91,7 @@ Are you sure you would like to continue? "#
             pass_name,
             temp_path: temp_file.into_temp_path(),
             modified: false,
+            commit_msg: None,
         })
     }
     /// # Warning
@@ -140,17 +142,35 @@ Are you sure you would like to continue? "#
     pub fn content_reader(&self) -> std::io::Result<impl Read + '_> {
         File::open(&self.temp_path)
     }
+    pub fn set_commit_msg(&mut self, msg: String) {
+        self.commit_msg = Some(msg);
+    }
     /// Write all content from temp file to encrypted file.
     #[allow(clippy::missing_panics_doc/* Reason: get_pass_path() is not filesystem root */)]
     pub fn flush(&self) -> Result<()> {
         let final_version = crate::utils::read_to_vec(File::open(&*self.temp_path)?)?;
         let path = get_pass_path(&self.pass_name);
+
         std::fs::create_dir_all(path.parent().unwrap())?;
         let mut pass_file = File::create(path)?;
         let encrypted = encrypt(&self.pass_name, &final_version)?;
         pass_file.write_all(&encrypted)?;
+
         if self.modified {
-            eprintln!("WARNING: Current version can not add this change to git");
+            if let Some(ref commit_msg) = self.commit_msg {
+                let result = crate::git::commit_file(
+                    PASS_DIR_ROOT.as_os_str(),
+                    &(self.pass_name.clone() + ".gpg"),
+                    commit_msg,
+                );
+                if let Err(err) = result {
+                    match err {
+                        Error::PassStoreShouldBeGitRepo => (),
+                        err => return Err(err),
+                    }
+                }
+            }
+            eprintln!("NOTE: not added to git because `commit_msg` not specified.");
         }
         Ok(())
     }
