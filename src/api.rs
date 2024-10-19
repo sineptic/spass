@@ -17,10 +17,12 @@ pub static PASS_DIR_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
 pub struct PassFile {
     pub pass_name: String, // FIXME: remove pub
     temp_path: tempfile::TempPath,
+    /// Changes should be added to git.
+    modified: bool,
 }
 impl PassFile {
     /// # Safety
-    /// You must drop `EncryptedFile`
+    /// You must drop `EncryptedFile`.
     pub unsafe fn open(pass_name: String) -> Result<Self> {
         check_uninitialized_store()?;
         let content = crate::utils::read_to_vec(get_readonly_pass_file(pass_name.clone())?)?;
@@ -33,7 +35,7 @@ impl PassFile {
         PassFile::new(pass_name, &content)
     }
     /// # Safety
-    /// You must drop `EncryptedFile`
+    /// You must drop `EncryptedFile`.
     #[allow(clippy::missing_panics_doc/* Reason: get_root() is not filesystem root */)]
     pub unsafe fn create(pass_name: String, force: bool) -> Result<Self> {
         check_uninitialized_store()?;
@@ -55,8 +57,12 @@ impl PassFile {
                 }
             })?;
         };
-        PassFile::new(pass_name, &[])
+        let mut temp = PassFile::new(pass_name, &[])?;
+        temp.modified = true;
+        Ok(temp)
     }
+    /// # Warning
+    /// `modified` by default set to true.
     fn new(pass_name: String, content: &[u8]) -> Result<Self> {
         fn create_temp_file() -> Result<tempfile::NamedTempFile> {
             let template = format!("{}.XXXXXXXXXXXXX", utils::how_i_invoked());
@@ -83,13 +89,14 @@ Are you sure you would like to continue? "#
         Ok(Self {
             pass_name,
             temp_path: temp_file.into_temp_path(),
+            modified: false,
         })
     }
     /// # Warning
     /// - You can see all changes only after `flush()` or `drop()`.
     /// - Current changes don't affect old pass file.
     /// # Note
-    /// If function return error, `PathFile` stay unchanged.
+    /// If function return error, [`PathFile`] stay unchanged.
     pub fn copy(&mut self, new_name: String, force: bool) -> std::io::Result<()> {
         let new_path = get_pass_path(&new_name);
         let user_agreement = || -> std::io::Result<bool> {
@@ -98,6 +105,7 @@ Are you sure you would like to continue? "#
         };
         if force || !new_path.exists() || user_agreement()? {
             self.pass_name = new_name;
+            self.modified = true;
         }
         Ok(())
     }
@@ -114,14 +122,17 @@ Are you sure you would like to continue? "#
         if force || !new_path.exists() || user_agreement()? {
             std::fs::remove_file(get_pass_path(&self.pass_name))?;
             self.pass_name = new_name;
+            self.modified = true;
         }
         Ok(())
     }
     #[must_use]
-    pub fn get_path_to_unencrypted(&self) -> &Path {
+    pub fn get_path_to_unencrypted(&mut self) -> &Path {
+        self.modified = true;
         &self.temp_path
     }
     pub fn content_writer(&mut self) -> std::io::Result<impl Write + '_> {
+        self.modified = true;
         File::create(&self.temp_path)
     }
     pub fn content_reader(&self) -> std::io::Result<impl Read + '_> {
@@ -136,7 +147,9 @@ Are you sure you would like to continue? "#
         let mut pass_file = File::create(path)?;
         let encrypted = encrypt(&self.pass_name, &final_version)?;
         pass_file.write_all(&encrypted)?;
-        eprintln!("WARNING: Current version can not add this change to git");
+        if self.modified {
+            eprintln!("WARNING: Current version can not add this change to git");
+        }
         Ok(())
     }
 }

@@ -124,7 +124,7 @@ fn main() -> anyhow::Result<()> {
         Command::Edit { pass_name } => {
             check_uninitialized_store()?;
             // Safety: we don't call to functions that may exit and don't drop anything
-            let pass_file = unsafe { api::PassFile::open(pass_name) }?;
+            let mut pass_file = unsafe { api::PassFile::open(pass_name) }?;
             let temp_path = pass_file.get_path_to_unencrypted();
             std::process::Command::new(&*EDITOR_NAME)
                 .arg(temp_path)
