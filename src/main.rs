@@ -10,7 +10,7 @@ use std::{
     fmt::Display,
     io::{stderr, stdin, stdout, Write},
     path::{Path, PathBuf},
-    process::exit,
+    process::{exit, ExitCode},
     ptr::drop_in_place,
     string::FromUtf8Error,
     sync::{Arc, LazyLock, Mutex},
@@ -27,6 +27,7 @@ static DEFAULT_GENERATED_LENGTH: usize = 25;
 
 #[allow(clippy::option_option)]
 mod args;
+mod git;
 mod utils;
 
 #[derive(Error, Debug)]
@@ -53,6 +54,17 @@ pub enum Error {
     PasswordsDontMatch,
     #[error("{pass_name} is not in the password store.\nNote: Your pass will have path {:?}", api::PASS_DIR_ROOT.join(pass_name).to_str().unwrap().to_string() + ".gpg")]
     PassDoesNotExist { pass_name: String },
+
+    #[error("Password store is not a git repository")]
+    PassStoreShouldBeGitRepo,
+    #[error("Can't stage file {file_name:?}")]
+    CantStageFile { file_name: String },
+    #[error("Can't initialize git repository")]
+    CantInitGitRepo,
+    #[error("Git repository already initialized")]
+    GitRepoAlreadyInitialized,
+    #[error("Can't commit changes")]
+    CantCommit,
 }
 type Result<T> = std::result::Result<T, Error>;
 
@@ -60,9 +72,10 @@ mod api;
 pub use api::*;
 
 #[allow(clippy::too_many_lines)]
-fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<ExitCode> {
     let args = Args::parse();
     // dbg!(&args);
+
     match args.command {
         Command::Init { subfolder, gpg_ids } => api::init(subfolder, gpg_ids),
         Command::List { subfolder } => {
@@ -192,9 +205,8 @@ fn main() -> anyhow::Result<()> {
                 } else {
                     std::fs::remove_file(path)?;
                 }
+                eprintln!("WARNING: Current version can not add this change to git");
             }
-
-            eprintln!("WARNING: Current version can not add this change to git");
         }
         Command::Rename {
             force,
@@ -230,11 +242,30 @@ fn main() -> anyhow::Result<()> {
                 new_pass,
             )?;
         }
-        Command::Git {
-            git_command_args: _,
-        } => todo!(),
+        Command::Git { git_command_args } => {
+            if git_command_args
+                .first()
+                .ok_or_else(|| todo!("return error and remove unwrap"))
+                .unwrap()
+                == "init"
+            {
+                git::init(
+                    api::PASS_DIR_ROOT.to_str().unwrap(),
+                    git_command_args.into_iter().skip(1),
+                )?;
+            } else {
+                let exit_code = git::command(
+                    api::PASS_DIR_ROOT.to_str().unwrap(),
+                    git_command_args.into_iter(),
+                )?
+                .code();
+                if exit_code.is_some_and(|c| c != 0) {
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+        }
     };
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 fn find_recursion(

@@ -120,9 +120,11 @@ Are you sure you would like to continue? "#
             yesno(false)
         };
         if force || !new_path.exists() || user_agreement()? {
-            std::fs::remove_file(get_pass_path(&self.pass_name))?;
+            let prev_pass_name = self.pass_name.clone();
             self.pass_name = new_name;
             self.modified = true;
+            self.flush()?;
+            std::fs::remove_file(get_pass_path(&prev_pass_name))?;
         }
         Ok(())
     }
