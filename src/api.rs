@@ -72,11 +72,11 @@ impl PassFile {
             let temp_file = tempfile::NamedTempFile::new_in(&secure_tempdir).or_else(|_| {
                 #[rustfmt::skip]
                 print!(
-r#"Your system does not have /dev/shm, which means that it may
+"Your system does not have /dev/shm, which means that it may
 be difficult to entirely erase the temporary non-encrypted
 password file after editing.
 
-Are you sure you would like to continue? "#
+Are you sure you would like to continue? "
                 );
                 if utils::yesno(false)? {
                     std::process::exit(1);
