@@ -112,7 +112,7 @@ Are you sure you would like to continue? "#
         Ok(())
     }
     /// # Warning
-    /// You can see all changes only after `flush()` or `drop()`.
+    /// You must specify commit message before running this method.
     /// # Note
     /// If function return error, `PathFile` stay unchanged.
     pub fn rename(&mut self, new_name: String, force: bool) -> Result<()> {

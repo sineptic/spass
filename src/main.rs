@@ -3,6 +3,7 @@
 #![deny(clippy::missing_panics_doc)]
 #![allow(clippy::redundant_closure_for_method_calls)]
 
+use anyhow::anyhow;
 use arboard::Clipboard;
 use args::{Args, Command};
 use clap::Parser;
@@ -264,8 +265,7 @@ fn main() -> anyhow::Result<ExitCode> {
         Command::Git { git_command_args } => {
             if git_command_args
                 .first()
-                .ok_or_else(|| todo!("return error and remove unwrap"))
-                .unwrap()
+                .ok_or(anyhow!("You should provide at least 1 argument for git"))?
                 == "init"
             {
                 git::init(
@@ -358,12 +358,12 @@ fn copy_move(
         let mut pass_file = unsafe { api::PassFile::open(old_pass.to_string()) }?;
         match copy_move {
             CopyMove::Copy => {
-                pass_file.copy(new_pass.to_string(), force)?;
                 pass_file.set_commit_msg(format!("Copy {old_pass} to {new_pass}."));
+                pass_file.copy(new_pass.to_string(), force)?;
             }
             CopyMove::Move => {
-                pass_file.rename(new_pass.to_string(), force)?;
                 pass_file.set_commit_msg(format!("Rename {old_pass} to {new_pass}."));
+                pass_file.rename(new_pass.to_string(), force)?;
             }
         }
         drop(pass_file);
