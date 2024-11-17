@@ -1,16 +1,16 @@
 #![warn(clippy::pedantic)]
-#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_errors_doc, clippy::redundant_closure_for_method_calls)]
 #![deny(clippy::missing_panics_doc)]
-#![allow(clippy::redundant_closure_for_method_calls)]
 
+use anyhow::anyhow;
 use arboard::Clipboard;
 use args::{Args, Command};
 use clap::Parser;
 use std::{
     fmt::Display,
     io::{stderr, stdin, stdout, Write},
-    path::{Path, PathBuf},
-    process::exit,
+    path::Path,
+    process::{exit, ExitCode},
     ptr::drop_in_place,
     string::FromUtf8Error,
     sync::{Arc, LazyLock, Mutex},
@@ -27,6 +27,7 @@ static DEFAULT_GENERATED_LENGTH: usize = 25;
 
 #[allow(clippy::option_option)]
 mod args;
+mod git;
 mod utils;
 
 #[derive(Error, Debug)]
@@ -35,7 +36,7 @@ pub enum Error {
     IO(#[from] std::io::Error),
     #[error(transparent)]
     GPG(#[from] gpgme::Error),
-    #[error(transparent)] // TODO: custom message
+    #[error(transparent)]
     FromUtf(#[from] FromUtf8Error),
     #[error(transparent)]
     Clipboard(#[from] arboard::Error),
@@ -53,6 +54,17 @@ pub enum Error {
     PasswordsDontMatch,
     #[error("{pass_name} is not in the password store.\nNote: Your pass will have path {:?}", api::PASS_DIR_ROOT.join(pass_name).to_str().unwrap().to_string() + ".gpg")]
     PassDoesNotExist { pass_name: String },
+
+    #[error("Password store is not a git repository")]
+    PassStoreShouldBeGitRepo,
+    #[error("Can't stage file {file_name:?}")]
+    CantStageFile { file_name: String },
+    #[error("Can't initialize git repository")]
+    CantInitGitRepo,
+    #[error("Git repository already initialized")]
+    GitRepoAlreadyInitialized,
+    #[error("Can't commit changes")]
+    CantCommit,
 }
 type Result<T> = std::result::Result<T, Error>;
 
@@ -60,9 +72,17 @@ mod api;
 pub use api::*;
 
 #[allow(clippy::too_many_lines)]
-fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<ExitCode> {
     let args = Args::parse();
     // dbg!(&args);
+    match git::unstage_all(api::PASS_DIR_ROOT.as_os_str()) {
+        Ok(()) => (),
+        Err(x) => match x {
+            Error::PassStoreShouldBeGitRepo => (),
+            x => return Err(x.into()),
+        },
+    };
+
     match args.command {
         Command::Init { subfolder, gpg_ids } => api::init(subfolder, gpg_ids),
         Command::List { subfolder } => {
@@ -116,15 +136,22 @@ fn main() -> anyhow::Result<()> {
             pass_name,
         } => {
             check_uninitialized_store()?;
-            // Safety: we don't call to functions that may exit and don't drop anything
+            // Safety: we don't call to functions that may exit and doesn't drop everything
             let mut pass_file = unsafe { api::PassFile::create(pass_name.clone(), force) }?;
             let password = get_password_from_user(&pass_name, echo, multiline)?;
+
+            pass_file.set_commit_msg(format!("Add given password for {pass_name} to store."));
             pass_file.content_writer()?.write_all(password.as_bytes())?;
         }
         Command::Edit { pass_name } => {
             check_uninitialized_store()?;
-            // Safety: we don't call to functions that may exit and don't drop anything
-            let pass_file = unsafe { api::PassFile::open(pass_name) }?;
+
+            // Safety: we don't call to functions that may exit and doesn't drop everything
+            let mut pass_file = unsafe { api::PassFile::open(pass_name.clone()) }?;
+            pass_file.set_commit_msg(format!(
+                "Edit password for {pass_name} using {}.",
+                &*EDITOR_NAME
+            ));
             let temp_path = pass_file.get_path_to_unencrypted();
             std::process::Command::new(&*EDITOR_NAME)
                 .arg(temp_path)
@@ -143,8 +170,9 @@ fn main() -> anyhow::Result<()> {
             let password = generate_password(length, no_symbols);
 
             if in_place {
-                // Safety: dropped in end of if block
+                // Safety: dropped in the end of if block
                 let mut pass_file = unsafe { api::PassFile::open(pass_name.clone()) }?;
+                pass_file.set_commit_msg(format!("Replace generated password for {pass_name}."));
                 let old_content = std::io::read_to_string(pass_file.content_reader()?)?;
                 let old_content_tail = remove_first_line(&old_content);
                 let new_content = password.clone() + "\n" + &old_content_tail;
@@ -152,9 +180,12 @@ fn main() -> anyhow::Result<()> {
                     .content_writer()?
                     .write_all(new_content.as_bytes())?;
             } else {
-                // Safety: dropped in end of else block
+                // Safety: dropped in the end of else block
                 let mut pass_file = unsafe { api::PassFile::create(pass_name.clone(), force) }?;
-                pass_file.content_writer()?.write_all(password.as_bytes())?;
+                pass_file.set_commit_msg(format!("Add generated password for {pass_name}"));
+                pass_file
+                    .content_writer()?
+                    .write_all((password.clone() + "\n").as_bytes())?;
             }
             if clip {
                 clipboard_copy(&password, &pass_name)?;
@@ -190,9 +221,11 @@ fn main() -> anyhow::Result<()> {
                 } else {
                     std::fs::remove_file(path)?;
                 }
+                git::commit_all(
+                    api::PASS_DIR_ROOT.as_os_str(),
+                    &format!("Remove {pass_name} from store."),
+                )?;
             }
-
-            eprintln!("WARNING: Current version can not add this change to git");
         }
         Command::Rename {
             force,
@@ -204,11 +237,11 @@ fn main() -> anyhow::Result<()> {
             copy_move(
                 CopyMove::Move,
                 recursive,
-                old_root,
+                &old_root,
                 &new_root,
                 force,
-                old_pass,
-                new_pass,
+                &old_pass,
+                &new_pass,
             )?;
         }
         Command::Copy {
@@ -221,18 +254,34 @@ fn main() -> anyhow::Result<()> {
             copy_move(
                 CopyMove::Copy,
                 recursive,
-                old_root,
+                &old_root,
                 &new_root,
                 force,
-                old_pass,
-                new_pass,
+                &old_pass,
+                &new_pass,
             )?;
         }
-        Command::Git {
-            git_command_args: _,
-        } => todo!(),
+        Command::Git { git_command_args } => {
+            if git_command_args
+                .first()
+                .ok_or(anyhow!("You should provide at least 1 argument for git"))?
+                == "init"
+            {
+                git::init(
+                    api::PASS_DIR_ROOT.as_os_str(),
+                    git_command_args.into_iter().skip(1),
+                )?;
+            } else {
+                let exit_code =
+                    git::command(api::PASS_DIR_ROOT.as_os_str(), git_command_args.into_iter())?
+                        .code();
+                if exit_code.is_some_and(|c| c != 0) {
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+        }
     };
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 fn find_recursion(
@@ -267,57 +316,23 @@ enum CopyMove {
 fn copy_move(
     copy_move: CopyMove,
     recursive: bool,
-    old_root: PathBuf,
+    old_root: &Path,
     new_root: &Path,
     force: bool,
-    old_pass: String,
-    new_pass: String,
+    old_pass: &str,
+    new_pass: &str,
 ) -> Result<()> {
     if recursive {
         assert_ne!(old_root, *api::PASS_DIR_ROOT);
-        let files = walkdir::WalkDir::new(&old_root).contents_first(true);
-        let mut pass_files = files
-            .into_iter()
-            .filter_entry(|x| {
-                x.file_type().is_file() && x.path().extension().is_some_and(|ext| ext == "gpg")
-            })
-            .filter_map(|x| x.ok())
-            .map(|x| x.into_path())
-            .map(|x| {
-                (
-                    new_root
-                        .join(x.strip_prefix(&old_root).unwrap().to_str().unwrap())
-                        .strip_prefix(&*api::PASS_DIR_ROOT)
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                        .strip_suffix(".gpg")
-                        .unwrap()
-                        .to_string(),
-                    x.strip_prefix(&*api::PASS_DIR_ROOT)
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                        .strip_suffix(".gpg")
-                        .unwrap()
-                        .to_string(),
-                )
-            })
-            .map(|(new_pass_name, old_pass_name)| -> Result<_> {
-                // Safety: pass files will be dropped at the and of else block.
-                Ok((new_pass_name, unsafe {
-                    api::PassFile::open(old_pass_name)
-                }?))
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut pass_files = get_pass_files_recursively(old_root, new_root)?;
         match copy_move {
             CopyMove::Copy => {
-                for (new_name, pass_file) in &mut pass_files {
+                for (pass_file, new_name) in &mut pass_files {
                     pass_file.copy(new_name.to_owned(), force)?;
                 }
             }
             CopyMove::Move => {
-                for (new_name, pass_file) in &mut pass_files {
+                for (pass_file, new_name) in &mut pass_files {
                     pass_file.rename(new_name.to_owned(), force)?;
                 }
                 // NOTE: required to run before drop
@@ -325,20 +340,74 @@ fn copy_move(
             }
         }
         drop(pass_files);
+        git::commit_all(
+            api::PASS_DIR_ROOT.as_os_str(),
+            &format!(
+                "{operation} {old_pass} to {new_pass}.",
+                operation = match copy_move {
+                    CopyMove::Copy => "Copy",
+                    CopyMove::Move => "Move",
+                },
+            ),
+        )?;
     } else {
         // Safety: pass file will be dropped at the and of else block.
-        let mut pass_file = unsafe { api::PassFile::open(old_pass) }?;
+        let mut pass_file = unsafe { api::PassFile::open(old_pass.to_string()) }?;
         match copy_move {
             CopyMove::Copy => {
-                pass_file.copy(new_pass, force)?;
+                pass_file.set_commit_msg(format!("Copy {old_pass} to {new_pass}."));
+                pass_file.copy(new_pass.to_string(), force)?;
             }
             CopyMove::Move => {
-                pass_file.rename(new_pass, force)?;
+                pass_file.set_commit_msg(format!("Rename {old_pass} to {new_pass}."));
+                pass_file.rename(new_pass.to_string(), force)?;
             }
         }
         drop(pass_file);
     }
     Ok(())
+}
+
+/// # Returns
+/// Vec<(pass file, new pass name if `old_root` change to `new_root`)>
+fn get_pass_files_recursively(old_root: &Path, new_root: &Path) -> Result<Vec<(PassFile, String)>> {
+    let files = walkdir::WalkDir::new(old_root).contents_first(true);
+    let pass_files = files
+        .into_iter()
+        .filter_entry(|x| {
+            x.file_type().is_file() && x.path().extension().is_some_and(|ext| ext == "gpg")
+        })
+        .filter_map(|x| x.ok())
+        .map(|x| x.into_path())
+        .map(|x| {
+            (
+                x.strip_prefix(&*api::PASS_DIR_ROOT)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .strip_suffix(".gpg")
+                    .unwrap()
+                    .to_string(),
+                new_root
+                    .join(x.strip_prefix(old_root).unwrap().to_str().unwrap())
+                    .strip_prefix(&*api::PASS_DIR_ROOT)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .strip_suffix(".gpg")
+                    .unwrap()
+                    .to_string(),
+            )
+        })
+        .map(|(old_pass_name, new_pass_name)| -> Result<_> {
+            // Safety: pass files will be dropped at the and of else block.
+            Ok((
+                unsafe { api::PassFile::open(old_pass_name) }?,
+                new_pass_name,
+            ))
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(pass_files)
 }
 
 fn remove_first_line(old_content: &str) -> String {
@@ -365,14 +434,9 @@ fn generate_password(length: usize, no_symbols: bool) -> String {
             .collect::<Vec<_>>()
     };
     let a = rand::distributions::Slice::new(&chars).unwrap();
-    let mut b = rand::rngs::StdRng::sample_iter(rand::rngs::StdRng::from_entropy(), a);
+    let rand_char = rand::rngs::StdRng::sample_iter(rand::rngs::StdRng::from_entropy(), a);
 
-    // FIXME: rewrite
-    let mut password = String::new();
-    for _ in 0..length {
-        password.push(*b.next().unwrap());
-    }
-    password
+    rand_char.take(length).collect()
 }
 
 fn get_password_from_user(pass_name: &str, echo: bool, multiline: bool) -> Result<String> {
@@ -383,7 +447,14 @@ fn get_password_from_user(pass_name: &str, echo: bool, multiline: bool) -> Resul
         stdin().read_line(&mut password)?;
         password
     } else if multiline {
-        todo!()
+        let tempfile = utils::create_temp_file()?;
+        std::process::Command::new(&*EDITOR_NAME)
+            .arg(tempfile.path())
+            .spawn()?
+            .wait()?;
+        let content = std::fs::read_to_string(tempfile.path())?;
+        tempfile.close()?;
+        content
     } else {
         let password = rpassword::prompt_password(format!("Enter password for {pass_name}: "))?;
         if password != rpassword::prompt_password(format!("Retype password for {pass_name}: "))? {
