@@ -65,27 +65,7 @@ impl PassFile {
     /// # Warning
     /// `modified` by default set to true.
     fn new(pass_name: String, content: &[u8]) -> Result<Self> {
-        fn create_temp_file() -> Result<tempfile::NamedTempFile> {
-            let template = format!("{}.XXXXXXXXXXXXX", utils::how_i_invoked());
-            let secure_tempdir = PathBuf::from("/dev/shm/").join(&template);
-            std::fs::create_dir_all(&secure_tempdir)?;
-            let temp_file = tempfile::NamedTempFile::new_in(&secure_tempdir).or_else(|_| {
-                #[rustfmt::skip]
-                print!(
-"Your system does not have /dev/shm, which means that it may
-be difficult to entirely erase the temporary non-encrypted
-password file after editing.
-
-Are you sure you would like to continue? "
-                );
-                if utils::yesno(false)? {
-                    std::process::exit(1);
-                }
-                tempfile::NamedTempFile::new()
-            })?;
-            Ok(temp_file)
-        }
-        let mut temp_file = create_temp_file()?;
+        let mut temp_file = utils::create_temp_file()?;
         temp_file.write_all(content)?;
         Ok(Self {
             pass_name,

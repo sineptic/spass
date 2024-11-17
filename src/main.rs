@@ -344,10 +344,8 @@ fn copy_move(
         git::commit_all(
             api::PASS_DIR_ROOT.as_os_str(),
             &format!(
-                "{reason} {} to {}.",
-                old_root.to_string_lossy(),
-                new_root.to_string_lossy(),
-                reason = match copy_move {
+                "{operation} {old_pass} to {new_pass}.",
+                operation = match copy_move {
                     CopyMove::Copy => "Copy",
                     CopyMove::Move => "Move",
                 },
@@ -455,7 +453,14 @@ fn get_password_from_user(pass_name: &str, echo: bool, multiline: bool) -> Resul
         stdin().read_line(&mut password)?;
         password
     } else if multiline {
-        todo!()
+        let tempfile = utils::create_temp_file()?;
+        std::process::Command::new(&*EDITOR_NAME)
+            .arg(tempfile.path())
+            .spawn()?
+            .wait()?;
+        let content = std::fs::read_to_string(tempfile.path())?;
+        tempfile.close()?;
+        content
     } else {
         let password = rpassword::prompt_password(format!("Enter password for {pass_name}: "))?;
         if password != rpassword::prompt_password(format!("Retype password for {pass_name}: "))? {
