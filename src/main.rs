@@ -435,14 +435,9 @@ fn generate_password(length: usize, no_symbols: bool) -> String {
             .collect::<Vec<_>>()
     };
     let a = rand::distributions::Slice::new(&chars).unwrap();
-    let mut b = rand::rngs::StdRng::sample_iter(rand::rngs::StdRng::from_entropy(), a);
+    let rand_char = rand::rngs::StdRng::sample_iter(rand::rngs::StdRng::from_entropy(), a);
 
-    // FIXME: rewrite
-    let mut password = String::new();
-    for _ in 0..length {
-        password.push(*b.next().unwrap());
-    }
-    password
+    rand_char.take(length).collect()
 }
 
 fn get_password_from_user(pass_name: &str, echo: bool, multiline: bool) -> Result<String> {
