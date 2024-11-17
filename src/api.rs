@@ -15,7 +15,7 @@ pub static PASS_DIR_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
 #[derive(Debug)]
 #[must_use]
 pub struct PassFile {
-    pub pass_name: String, // FIXME: remove pub
+    pass_name: String,
     temp_path: tempfile::TempPath,
     /// Changes should be added to git.
     maybe_modified: bool,
