@@ -1,7 +1,6 @@
 #![warn(clippy::pedantic)]
-#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_errors_doc, clippy::redundant_closure_for_method_calls)]
 #![deny(clippy::missing_panics_doc)]
-#![allow(clippy::redundant_closure_for_method_calls)]
 
 use anyhow::anyhow;
 use arboard::Clipboard;
