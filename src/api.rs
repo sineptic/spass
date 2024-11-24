@@ -1,11 +1,12 @@
-use super::{Error, Result};
-use crate::utils::{self, yesno};
 use std::{
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::LazyLock,
 };
+
+use super::{Error, Result};
+use crate::utils::{self, yesno};
 
 pub static PASS_DIR_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
     PathBuf::from(std::env::var("HOME").expect("env variable `HOME` should be set"))

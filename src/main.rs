@@ -2,10 +2,6 @@
 #![allow(clippy::missing_errors_doc, clippy::redundant_closure_for_method_calls)]
 #![deny(clippy::missing_panics_doc)]
 
-use anyhow::anyhow;
-use arboard::Clipboard;
-use args::{Args, Command};
-use clap::Parser;
 use std::{
     fmt::Display,
     io::{stderr, stdin, stdout, Write},
@@ -17,6 +13,11 @@ use std::{
     thread::sleep,
     time::Duration,
 };
+
+use anyhow::anyhow;
+use arboard::Clipboard;
+use args::{Args, Command};
+use clap::Parser;
 use thiserror::Error;
 
 // TODO: load it smart

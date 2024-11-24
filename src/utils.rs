@@ -1,5 +1,6 @@
-use crate::Result;
 use std::{io::Write, path::PathBuf};
+
+use crate::Result;
 
 pub fn read_to_vec(mut source: impl std::io::Read) -> std::io::Result<Vec<u8>> {
     let mut buf = Vec::new();

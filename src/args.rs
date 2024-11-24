@@ -1,5 +1,6 @@
-use crate::{CLIP_TIME, DEFAULT_GENERATED_LENGTH, EDITOR_NAME};
 use clap::{Parser, Subcommand};
+
+use crate::{CLIP_TIME, DEFAULT_GENERATED_LENGTH, EDITOR_NAME};
 
 #[derive(Parser, Debug)]
 #[command(version)]
